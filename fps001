@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FPS de Cubos — Three.js</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;overflow:hidden;background:#101820;color:white;font:15px system-ui}
+    canvas{display:block}
+    .hud{position:fixed;inset:12px 14px auto;display:flex;justify-content:space-between;pointer-events:none;text-shadow:0 2px 4px #000;z-index:10}
+    .stats{display:flex;gap:15px;font-weight:bold;font-size:17px}
+    .buttons{display:flex;gap:8px;align-items:center;pointer-events:auto}
+    button{color:white;background:#17394b;border:1px solid #9bd2e5;border-radius:7px;padding:8px 10px;cursor:pointer}
+    .help{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:#101820dd;border-radius:8px;padding:8px 12px;text-align:center;font-size:13px;pointer-events:none}
+    .cross{position:fixed;left:50%;top:50%;width:16px;height:16px;transform:translate(-50%,-50%);pointer-events:none}
+    .cross:before,.cross:after{content:"";position:absolute;background:#fff;box-shadow:0 0 3px #000}
+    .cross:before{left:7px;width:2px;height:16px}
+    .cross:after{top:7px;width:16px;height:2px}
+    .msg{position:fixed;top:43%;width:100%;padding:0 15px;text-align:center;font-size:24px;text-shadow:0 2px 5px #000;pointer-events:none;color:#ff6b6b}
+    .hit{position:fixed;top:calc(50% + 22px);left:50%;transform:translateX(-50%);color:#fff7a8;font-weight:bold;pointer-events:none}
+    #damage-flash{position:fixed;inset:0;background:rgba(255,0,0,0.25);pointer-events:none;opacity:0;transition:opacity 0.1s}
+  </style>
+</head>
+<body>
+  <div id="damage-flash"></div>
+  <div class="hud">
+    <div class="stats">
+      <span id="health" style="color:#4eff7b">Vida: 100</span>
+      <span id="score">Pontos: 0</span>
+    </div>
+    <div class="buttons">
+      <button id="reset">Reiniciar</button>
+      <button id="full">Tela cheia</button>
+      <button id="save">Baixar HTML</button>
+    </div>
+  </div>
+  <div class="cross"></div>
+  <div class="msg" id="msg">Clique na cena para capturar o mouse</div>
+  <div class="hit" id="hit"></div>
+  <div class="help">Clique na cena para jogar · mouse mira · WASD move · clique/espaço atira · Esc libera</div>
+
+  <script>
+    const T = THREE;
+    const msg = document.querySelector('#msg');
+    const healthEl = document.querySelector('#health');
+    const damageFlash = document.querySelector('#damage-flash');
+
+    // SINTETIZADOR DE ÁUDIO (Web Audio API)
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function playPlayerShootSound() {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.15);
+    }
+
+    function playEnemyShootSound() {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(80, audioCtx.currentTime + 0.2);
+      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.2);
+    }
+
+    // CONFIGURAÇÃO DA CENA 3D
+    const scene = new T.Scene();
+    scene.background = new T.Color(0x91c9e5);
+    scene.fog = new T.Fog(0x91c9e5, 35, 100);
+
+    const camera = new T.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 150);
+    camera.position.set(0, 1.7, 6);
+
+    const renderer = new T.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new T.HemisphereLight(0xe8f6ff, 0x536044, 2));
+    const sun = new T.DirectionalLight(0xffffff, 2);
+    sun.position.set(-5, 12, 8);
+    scene.add(sun);
+
+    const floor = new T.Mesh(new T.PlaneGeometry(140, 140), new T.MeshStandardMaterial({ color: 0x647b50, roughness: 1 }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.03;
+    scene.add(floor);
+
+    const grid = new T.GridHelper(140, 70, 0x293f37, 0x52654a);
+    grid.position.y = 0.01;
+    scene.add(grid);
+
+    // CAIXAS/OBSTÁCULOS E COLISÃO
+    const obstacles = [];
+    for (let i = 0; i < 28; i++) {
+      const x = (Math.random() - 0.5) * 90;
+      const z = -Math.random() * 85;
+      const w = 1.5 + Math.random() * 2;
+      const h = 1 + Math.random() * 3;
+      const d = 1.5 + Math.random() * 2;
+      const box = new T.Mesh(
+        new T.BoxGeometry(w, h, d),
+        new T.MeshStandardMaterial({ color: [0x777b80, 0x8a795f, 0x4d7465][i % 3] })
+      );
+      box.position.set(x, h / 2, z);
+      box.geometry.computeBoundingBox();
+      scene.add(box);
+      obstacles.push(box);
+    }
+
+    function checkObstacleCollision(position) {
+      const playerRadius = 0.6;
+      for (const box of obstacles) {
+        const boxMinX = box.position.x - box.geometry.parameters.width / 2 - playerRadius;
+        const boxMaxX = box.position.x + box.geometry.parameters.width / 2 + playerRadius;
+        const boxMinZ = box.position.z - box.geometry.parameters.depth / 2 - playerRadius;
+        const boxMaxZ = box.position.z + box.geometry.parameters.depth / 2 + playerRadius;
+
+        if (position.x >= boxMinX && position.x <= boxMaxX &&
+            position.z >= boxMinZ && position.z <= boxMaxZ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // INIMIGOS E PROJÉTEIS
+    function makeEnemy() {
+      const m = new T.Mesh(
+        new T.BoxGeometry(1.25, 1.25, 1.25),
+        new T.MeshStandardMaterial({ color: 0xe14d42, roughness: 0.65 })
+      );
+      m.position.set((Math.random() - 0.5) * 40, 0.8, -12 - Math.random() * 45);
+      m.userData = { lastShoot: performance.now() + Math.random() * 2000 };
+      scene.add(m);
+      return m;
+    }
+
+    let enemies = Array.from({ length: 10 }, makeEnemy);
+    let enemyBullets = [];
+    let score = 0;
+    let health = 100;
+    let yaw = 0;
+    let pitch = 0;
+    const keys = {};
+
+    function spawnEnemyBullet(fromPos) {
+      const bullet = new T.Mesh(
+        new T.SphereGeometry(0.2, 8, 8),
+        new T.MeshBasicMaterial({ color: 0xffcc00 })
+      );
+      bullet.position.copy(fromPos);
+      const dir = new T.Vector3().subVectors(camera.position, fromPos).normalize();
+      bullet.userData = { dir: dir, speed: 18 };
+      scene.add(bullet);
+      enemyBullets.push(bullet);
+      playEnemyShootSound();
+    }
+
+    // ARMA DO JOGADOR
+    function makeWeapon() {
+      const group = new T.Group();
+      const body = new T.Mesh(new T.BoxGeometry(0.24, 0.22, 0.42), new T.MeshStandardMaterial({ color: 0x263642, metalness: 0.35, roughness: 0.4 }));
+      body.position.set(0.35, -0.29, -0.62);
+      group.add(body);
+
+      const barrel = new T.Mesh(new T.BoxGeometry(0.105, 0.105, 0.32), new T.MeshStandardMaterial({ color: 0x91a6b1, metalness: 0.65, roughness: 0.3 }));
+      barrel.position.set(0.35, -0.24, -0.91);
+      group.add(barrel);
+
+      const grip = new T.Mesh(new T.BoxGeometry(0.12, 0.2, 0.14), new T.MeshStandardMaterial({ color: 0x34434c }));
+      grip.position.set(0.35, -0.46, -0.54);
+      group.add(grip);
+
+      return group;
+    }
+
+    const weapon = makeWeapon();
+    camera.add(weapon);
+    scene.add(camera);
+
+    const ray = new T.Raycaster();
+    let scoreEl = document.querySelector('#score');
+    let hitTimer = 0;
+
+    function shoot() {
+      if (health <= 0) return;
+      playPlayerShootSound();
+
+      ray.setFromCamera(new T.Vector2(0, 0), camera);
+      const found = ray.intersectObjects(enemies, false)[0];
+      if (found) {
+        scene.remove(found.object);
+        enemies = enemies.filter(x => x !== found.object);
+        enemies.push(makeEnemy());
+        scoreEl.textContent = 'Pontos: ' + (++score);
+        document.querySelector('#hit').textContent = 'Acertou!';
+        hitTimer = performance.now() + 500;
+      }
+    }
+
+    // CONTROLES E EVENTOS
+    renderer.domElement.addEventListener('click', () => {
+      if (health <= 0) return;
+      if (document.pointerLockElement !== renderer.domElement) {
+        renderer.domElement.requestPointerLock?.();
+        return;
+      }
+      shoot();
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      if (health > 0) {
+        msg.textContent = document.pointerLockElement === renderer.domElement ? '' : 'Clique na cena para capturar o mouse';
+      }
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (document.pointerLockElement === renderer.domElement && health > 0) {
+        yaw -= e.movementX * 0.0022;
+        pitch = Math.max(-1.35, Math.min(1.35, pitch - e.movementY * 0.0022));
+        camera.rotation.set(pitch, yaw, 0, 'YXZ');
+      }
+    });
+
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        shoot();
+      }
+    });
+
+    document.addEventListener('keyup', e => keys[e.code] = false);
+
+    // LOOP PRINCIPAL DE ANIMAÇÃO E LÓGICA DO JOGO
+    let last = performance.now();
+    function frame(t) {
+      requestAnimationFrame(frame);
+      const dt = Math.min((t - last) / 1000, 0.04);
+      last = t;
+
+      if (health > 0) {
+        // Movimentação do Jogador com Colisão
+        const forward = new T.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+        const right = new T.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+        const speed = 7;
+
+        let moveVector = new T.Vector3();
+        if (keys.KeyW || keys.ArrowUp) moveVector.add(forward);
+        if (keys.KeyS || keys.ArrowDown) moveVector.sub(forward);
+        if (keys.KeyD || keys.ArrowRight) moveVector.add(right);
+        if (keys.KeyA || keys.ArrowLeft) moveVector.sub(right);
+
+        if (moveVector.lengthSq() > 0) {
+          moveVector.normalize().multiplyScalar(speed * dt);
+          
+          // Testar movimento em X e Z separadamente para evitar travamentos em quinas
+          let targetX = camera.position.x + moveVector.x;
+          if (!checkObstacleCollision({ x: targetX, z: camera.position.z })) {
+            camera.position.x = Math.max(-65, Math.min(65, targetX));
+          }
+
+          let targetZ = camera.position.z + moveVector.z;
+          if (!checkObstacleCollision({ x: camera.position.x, z: targetZ })) {
+            camera.position.z = Math.max(-65, Math.min(10, targetZ));
+          }
+        }
+
+        // Lógica de Ataque dos Inimigos
+        enemies.forEach(enemy => {
+          if (t - enemy.userData.lastShoot > 2200) {
+            enemy.userData.lastShoot = t + Math.random() * 500;
+            const dist = enemy.position.distanceTo(camera.position);
+            if (dist < 45) spawnEnemyBullet(enemy.position);
+          }
+        });
+
+        // Atualização dos Projéteis dos Inimigos
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+          const b = enemyBullets[i];
+          b.position.addScaledVector(b.userData.dir, b.userData.speed * dt);
+
+          // Verificar acerto no jogador
+          if (b.position.distanceTo(camera.position) < 0.8) {
+            health = Math.max(0, health - 15);
+            healthEl.textContent = 'Vida: ' + health;
+            damageFlash.style.opacity = '1';
+            setTimeout(() => damageFlash.style.opacity = '0', 100);
+
+            if (health <= 0) {
+              msg.textContent = 'GAME OVER! Clique em Reiniciar para jogar novamente.';
+              document.exitPointerLock?.();
+            }
+
+            scene.remove(b);
+            enemyBullets.splice(i, 1);
+            continue;
+          }
+
+          // Remover se colidir com cenário ou ir longe demais
+          if (b.position.distanceTo(camera.position) > 60 || checkObstacleCollision(b.position)) {
+            scene.remove(b);
+            enemyBullets.splice(i, 1);
+          }
+        }
+
+        weapon.position.y = Math.sin(t * 0.006) * 0.008;
+      }
+
+      if (t > hitTimer) document.querySelector('#hit').textContent = '';
+      renderer.render(scene, camera);
+    }
+    requestAnimationFrame(frame);
+
+    // REDIMENSIONAR E REINICIAR
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    document.querySelector('#reset').onclick = () => {
+      score = 0;
+      health = 100;
+      scoreEl.textContent = 'Pontos: 0';
+      healthEl.textContent = 'Vida: 100';
+      msg.textContent = 'Clique na cena para capturar o mouse';
+
+      for (const e of enemies) scene.remove(e);
+      for (const b of enemyBullets) scene.remove(b);
+      enemyBullets = [];
+      enemies = Array.from({ length: 10 }, makeEnemy);
+
+      camera.position.set(0, 1.7, 6);
+      yaw = pitch = 0;
+      camera.rotation.set(0, 0, 0);
+    };
+
+    document.querySelector('#full').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.();
+
+    document.querySelector('#save').onclick = () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob(['<!doctype html>\n' + document.documentElement.outerHTML], { type: 'text/html' }));
+      a.download = 'fps-three-cubos.html';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    };
+  </script>
+</body>
+</html>
